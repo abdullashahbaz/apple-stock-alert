@@ -1,0 +1,35 @@
+name: Apple Stock Alert Bot
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"   # every 3h — each run loops ~3h50m internally, so shifts overlap
+  workflow_dispatch: {}
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 250
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r apple-alert/requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run alert bot
+        run: python apple-alert/apple_alert_bot.py
+        env:
+          MODEL_URL: ${{ vars.APPLE_MODEL_URL }}
+          SCREEN_KEYWORD: ${{ vars.APPLE_SCREEN_KEYWORD }}
+          CAPACITY_KEYWORD: ${{ vars.APPLE_CAPACITY_KEYWORD }}
+          CITY: ${{ vars.APPLE_CITY }}
+          TARGET_DATES: ${{ vars.APPLE_TARGET_DATES }}
+          TARGET_MONTH: ${{ vars.APPLE_TARGET_MONTH }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL_TO: ${{ vars.ALERT_EMAIL_TO }}
