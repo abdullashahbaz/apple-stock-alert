@@ -179,20 +179,26 @@ def poll_once(page):
     results = []
 
     for capacity in CAPACITY_KEYWORDS:
+        t0 = time.time()
         page.goto(MODEL_URL, wait_until="domcontentloaded", timeout=20000)
         page.wait_for_timeout(1500)
+        print(f"  [{capacity}] page loaded ({time.time()-t0:.1f}s)", flush=True)
 
         if "captcha" in visible_text(page).lower():
+            print(f"  [{capacity}] CAPTCHA detected — skipping", flush=True)
             continue
 
         click_option_matching(page, SCREEN_KEYWORD)
         capacity_ok = click_option_matching(page, capacity)
         if not capacity_ok:
-            print(f"Could not select capacity '{capacity}' — skipping this capacity this cycle.")
+            print(f"  [{capacity}] could not select this capacity — skipping", flush=True)
             continue
+        print(f"  [{capacity}] capacity selected ({time.time()-t0:.1f}s)", flush=True)
 
         color_radios = page.locator('input[data-autom^="dimensionColor"]')
         count = color_radios.count()
+        print(f"  [{capacity}] found {count} color option(s)", flush=True)
+
         for i in range(count):
             radio = color_radios.nth(i)
             color_name = radio.get_attribute("data-autom")
@@ -200,19 +206,27 @@ def poll_once(page):
                 radio.click(timeout=2000)
                 page.wait_for_timeout(800)
             except Exception:
+                print(f"  [{capacity}/{color_name}] could not click color — skipping", flush=True)
                 continue
 
-            add_to_bag = page.locator('[data-autom="add-to-cart"]')
+            add_to_bag = page.locator('[data-autom="continueButton"]')
             try:
                 if not add_to_bag.is_enabled(timeout=1000):
+                    print(f"  [{capacity}/{color_name}] not orderable, skipping cities", flush=True)
                     continue
             except Exception:
+                print(f"  [{capacity}/{color_name}] Add to Bag check failed, skipping cities", flush=True)
                 continue
 
+            print(f"  [{capacity}/{color_name}] orderable — checking {len(CITIES)} cit(y/ies)", flush=True)
             for city in CITIES:
+                tc = time.time()
                 avail_text = check_availability_for_city(page, city)
+                print(f"    [{capacity}/{color_name}/{city}] checked ({time.time()-tc:.1f}s), got {'text' if avail_text else 'nothing'}", flush=True)
                 for tag, line in matching_pickup_lines(avail_text):
                     results.append((capacity, color_name, city, tag, line))
+
+        print(f"  [{capacity}] done ({time.time()-t0:.1f}s total)", flush=True)
 
     return results
 
