@@ -144,30 +144,23 @@ def click_option_matching(page, keyword):
 
 
 def check_availability_for_city(page, city):
-    # Fast path: inline sticky delivery/pickup quote, shown once
-    # capacity+color are selected — no login or overlay needed. Confirmed
-    # live: real class is rf-dude-quote-sticky-delivery (NOT the old
-    # rf-fulfillment-quote, which no longer exists on this page).
-    try:
-        inline = page.locator(".rf-dude-quote-sticky-delivery, .rf-dude-quote-sticky-info").first
-        if inline.is_visible(timeout=1000):
-            text = inline.inner_text()
-            if city.lower() in text.lower():
-                return text
-    except Exception:
-        pass
+    # Read the whole page text rather than a narrow CSS class — Apple's
+    # exact class names for this summary panel have proven unreliable
+    # to pin down (confirmed wrong three times live). The pickup/delivery
+    # lines ("Order today. Delivers to X", "Pick up in store: ...") are
+    # readable in plain page text regardless of which container they're in.
+    text = visible_text(page)
+    if city.lower() in text.lower():
+        return text
 
-    # Full path: open the location overlay, pick the city, confirm with
-    # "View Options" (confirmed live: real trigger is deliveryDateChecker;
-    # the old productLocatorTriggerLink/.rf-pickup-quote-overlay-trigger
-    # no longer exist on this page).
+    # Target city isn't showing yet (Apple guessed a different one, or
+    # none, based on the runner's IP) — force it via the overlay.
     trigger = page.locator('[data-autom="deliveryDateChecker"], .rf-dude-quote-overlay-trigger').first
     try:
         trigger.click(timeout=2000)
     except Exception:
-        return None
+        return text  # return whatever we had — better than nothing
 
-    overlay_text = None
     try:
         city_select = page.locator('select[name="city"]')
         city_select.wait_for(timeout=3000)
@@ -177,7 +170,6 @@ def check_availability_for_city(page, city):
         if view_options.count() > 0:
             view_options.first.click(timeout=2000)
         page.wait_for_timeout(1500)
-        overlay_text = page.locator(".rf-dude-quote-sticky-delivery, .rf-dude-quote-sticky-info").first.inner_text()
     except Exception:
         pass
 
@@ -186,7 +178,7 @@ def check_availability_for_city(page, city):
     except Exception:
         pass
 
-    return overlay_text
+    return visible_text(page)
 
 
 def matching_pickup_lines(text):
