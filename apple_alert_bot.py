@@ -20,7 +20,7 @@ from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
-MODEL_URL = os.environ.get("MODEL_URL", "https://www.apple.com/ae/shop/buy-iphone/iphone-17-pro")
+MODEL_URL = os.environ.get("MODEL_URL", "https://www.apple.com/ae/shop/buy-iphone/iphone-18-pro")
 SCREEN_KEYWORD = os.environ.get("SCREEN_KEYWORD", "6_9inch")
 CAPACITY_KEYWORDS = [c.strip() for c in os.environ.get("CAPACITY_KEYWORDS", "256gb,512gb,1tb").split(",") if c.strip()]
 CITIES = [c.strip() for c in os.environ.get("CITIES", "Dubai,Abu Dhabi,Al Ain").split(",") if c.strip()]
