@@ -56,6 +56,12 @@ def visible_text(page):
     )
 
 
+_screenshot_counter = [0]
+def cycle_screenshot_tag():
+    _screenshot_counter[0] += 1
+    return _screenshot_counter[0]
+
+
 def click_option_matching(page, keyword):
     """Select a radio option two ways: (1) match Apple's real
     data-autom attribute containing the keyword, or (2) fall back to
@@ -204,6 +210,8 @@ def poll_once(page):
         page.goto(MODEL_URL, wait_until="domcontentloaded", timeout=20000)
         page.wait_for_timeout(1500)
         print(f"  [{capacity}] page loaded ({time.time()-t0:.1f}s)", flush=True)
+        page_snippet = visible_text(page)[:300].replace("\n", " | ")
+        print(f"  [{capacity}] page text starts with: {page_snippet}", flush=True)
 
         if "captcha" in visible_text(page).lower():
             print(f"  [{capacity}] CAPTCHA detected — skipping", flush=True)
@@ -213,6 +221,12 @@ def poll_once(page):
         capacity_ok = click_option_matching(page, capacity)
         if not capacity_ok:
             print(f"  [{capacity}] could not select this capacity — skipping", flush=True)
+            try:
+                shot_path = f"debug-{capacity}-{cycle_screenshot_tag()}.png"
+                page.screenshot(path=shot_path, full_page=True)
+                print(f"  [{capacity}] saved debug screenshot: {shot_path}", flush=True)
+            except Exception as e:
+                print(f"  [{capacity}] could not save debug screenshot: {e}", flush=True)
             continue
         print(f"  [{capacity}] capacity selected ({time.time()-t0:.1f}s)", flush=True)
 
