@@ -150,24 +150,28 @@ def matching_pickup_lines(text):
         return []
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     hits = []
-    day_targets = [d for d in TARGET_DATES if d != "today"]
+    # Split targets into: standalone keywords (alphabetic, e.g. "today", "tomorrow")
+    # vs day numbers that must appear near the target month (e.g. "18" near "Sep").
+    keyword_targets = [d for d in TARGET_DATES if not d.isdigit()]
+    day_number_targets = [d for d in TARGET_DATES if d.isdigit()]
     date_pattern = re.compile(
-        rf"\b({'|'.join(re.escape(d) for d in day_targets)})\b.{{0,10}}\b{TARGET_MONTH}\w*\b"
-        rf"|\b{TARGET_MONTH}\w*\b.{{0,10}}\b({'|'.join(re.escape(d) for d in day_targets)})\b",
+        rf"\b({'|'.join(re.escape(d) for d in day_number_targets)})\b.{{0,10}}\b{TARGET_MONTH}\w*\b"
+        rf"|\b{TARGET_MONTH}\w*\b.{{0,10}}\b({'|'.join(re.escape(d) for d in day_number_targets)})\b",
         re.IGNORECASE,
-    ) if day_targets else None
+    ) if day_number_targets else None
 
     for i, line in enumerate(lines):
         low = line.lower()
         if "deliver" in low:
             continue
-        is_today = "today" in TARGET_DATES and "today" in low
+        matched_keyword = next((k for k in keyword_targets if k in low), None)
         is_target_date = bool(date_pattern and date_pattern.search(low))
-        if not (is_today or is_target_date):
+        if not (matched_keyword or is_target_date):
             continue
         context = lines[i - 1] if i > 0 and "apple" in lines[i - 1].lower() else ""
         line_out = f"{context} — {line}" if context else line
-        hits.append(("TODAY" if is_today else "TARGET DATE", line_out))
+        tag = "TODAY" if matched_keyword == "today" else ("TARGET DATE" if is_target_date else matched_keyword.upper())
+        hits.append((tag, line_out))
     return hits
 
 
