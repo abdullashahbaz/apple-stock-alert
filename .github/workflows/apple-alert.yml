@@ -18,11 +18,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r apple-alert/requirements.txt
+          pip install -r requirements.txt
           playwright install --with-deps chromium
 
       - name: Run alert bot
-        run: python apple-alert/apple_alert_bot.py
+        run: python apple_alert_bot.py
         env:
           MODEL_URL: ${{ vars.APPLE_MODEL_URL }}
           SCREEN_KEYWORD: ${{ vars.APPLE_SCREEN_KEYWORD }}
