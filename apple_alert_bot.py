@@ -80,16 +80,26 @@ def cycle_screenshot_tag():
     return _screenshot_counter[0]
 
 
+def click_via_label(page, target):
+    """Click an input's associated <label for="..."> instead of the
+    input itself. Apple renders these inputs invisible (opacity:0) with
+    a visible label overlaid on top — clicking the input directly gets
+    blocked by that overlay (confirmed live via elementFromPoint)."""
+    input_id = target.get_attribute("id")
+    clickable = target
+    if input_id:
+        label = page.locator(f'label[for="{input_id}"]')
+        if label.count() > 0:
+            clickable = label.first
+    clickable.click(timeout=2000)
+
+
 def click_option_matching(page, keyword):
     """Select a radio option two ways: (1) match Apple's real
     data-autom attribute containing the keyword, or (2) fall back to
     finding a visible label whose TEXT contains the human-readable
-    version of the keyword. Either way, click the associated
-    <label for="..."> rather than the input itself — Apple renders
-    the real input invisible (opacity:0) with a visible label overlaid
-    on top of it, so clicking the input directly gets blocked by that
-    overlay (confirmed live: elementFromPoint on the input's own
-    center returns the label's span, not the input)."""
+    version of the keyword. Either way, clicks via the label overlay,
+    not the invisible input underneath it (see click_via_label)."""
     target = page.locator(f'input[data-autom*="{keyword}"]').first
     found = target.count() > 0
 
@@ -114,13 +124,6 @@ def click_option_matching(page, keyword):
         except Exception:
             return False
 
-    input_id = target.get_attribute("id")
-    clickable = target
-    if input_id:
-        label = page.locator(f'label[for="{input_id}"]')
-        if label.count() > 0:
-            clickable = label.first
-
     # Force a real change event even if already checked=true from a
     # restored cookie (React's state doesn't always sync to that).
     if target.is_checked():
@@ -128,14 +131,12 @@ def click_option_matching(page, keyword):
         siblings = page.locator(f'input[type="radio"][name="{group_name}"]')
         if siblings.count() > 1:
             try:
-                sib_id = siblings.nth(1).get_attribute("id")
-                sib_label = page.locator(f'label[for="{sib_id}"]') if sib_id else None
-                (sib_label.first if sib_label and sib_label.count() > 0 else siblings.nth(1)).click(timeout=1000)
+                click_via_label(page, siblings.nth(1))
                 page.wait_for_timeout(400)
             except Exception:
                 pass
     try:
-        clickable.click(timeout=2000)
+        click_via_label(page, target)
         page.wait_for_timeout(600)
         return True
     except Exception:
@@ -245,7 +246,7 @@ def poll_once(page):
             radio = color_radios.nth(i)
             color_name = radio.get_attribute("data-autom")
             try:
-                radio.click(timeout=2000)
+                click_via_label(page, radio)
                 page.wait_for_timeout(800)
             except Exception:
                 print(f"  [{capacity}/{color_name}] could not click color — skipping", flush=True)
