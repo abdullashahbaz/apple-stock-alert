@@ -17,6 +17,8 @@ import re
 import time
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
@@ -33,11 +35,26 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 ALERT_EMAIL_TO = os.environ.get("ALERT_EMAIL_TO", GMAIL_ADDRESS)
 
 
-def send_email(subject, body):
-    msg = MIMEText(body)
-    msg["Subject"] = f"[Apple Alert Bot] {subject}"
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = ALERT_EMAIL_TO
+def send_email(subject, body, attachment_path=None):
+    if attachment_path:
+        msg = MIMEMultipart()
+        msg["Subject"] = f"[Apple Alert Bot] {subject}"
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = ALERT_EMAIL_TO
+        msg.attach(MIMEText(body))
+        try:
+            with open(attachment_path, "rb") as f:
+                img = MIMEImage(f.read())
+                img.add_header("Content-Disposition", "attachment", filename=os.path.basename(attachment_path))
+                msg.attach(img)
+        except Exception as e:
+            msg.attach(MIMEText(f"\n(could not attach screenshot: {e})"))
+    else:
+        msg = MIMEText(body)
+        msg["Subject"] = f"[Apple Alert Bot] {subject}"
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = ALERT_EMAIL_TO
+
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
@@ -56,6 +73,7 @@ def visible_text(page):
     )
 
 
+_debug_sent = [False]
 _screenshot_counter = [0]
 def cycle_screenshot_tag():
     _screenshot_counter[0] += 1
@@ -218,17 +236,6 @@ def poll_once(page):
             continue
 
         click_option_matching(page, SCREEN_KEYWORD)
-        capacity_ok = click_option_matching(page, capacity)
-        if not capacity_ok:
-            print(f"  [{capacity}] could not select this capacity — skipping", flush=True)
-            try:
-                shot_path = f"debug-{capacity}-{cycle_screenshot_tag()}.png"
-                page.screenshot(path=shot_path, full_page=True)
-                print(f"  [{capacity}] saved debug screenshot: {shot_path}", flush=True)
-            except Exception as e:
-                print(f"  [{capacity}] could not save debug screenshot: {e}", flush=True)
-            continue
-        print(f"  [{capacity}] capacity selected ({time.time()-t0:.1f}s)", flush=True)
 
         color_radios = page.locator('input[data-autom^="dimensionColor"]')
         count = color_radios.count()
@@ -243,6 +250,31 @@ def poll_once(page):
             except Exception:
                 print(f"  [{capacity}/{color_name}] could not click color — skipping", flush=True)
                 continue
+
+            capacity_ok = click_option_matching(page, capacity)
+            if not capacity_ok:
+                print(f"  [{capacity}/{color_name}] could not select this capacity — skipping", flush=True)
+                if not _debug_sent[0]:
+                    try:
+                        shot_path = f"debug-{capacity}-{cycle_screenshot_tag()}.png"
+                        page.screenshot(path=shot_path, full_page=True)
+                        send_email(
+                            f"DEBUG — could not select capacity {capacity}",
+                            f"Page text snippet:\n{page_snippet}\n\nScreenshot attached — this is what headless Chrome actually sees on GitHub's server.",
+                            attachment_path=shot_path,
+                        )
+                        _debug_sent[0] = True
+                        print(f"  [{capacity}/{color_name}] debug screenshot emailed", flush=True)
+                    except Exception as e:
+                        print(f"  [{capacity}/{color_name}] could not email debug screenshot: {e}", flush=True)
+                continue
+
+            # Required before pickup dates appear: explicitly decline
+            # trade-in and AppleCare. Uses the same substring+text-fallback
+            # matcher, so it's tolerant of the exact attribute name.
+            click_option_matching(page, "noTradeIn")
+            click_option_matching(page, "noapplecare")
+            page.wait_for_timeout(500)
 
             print(f"  [{capacity}/{color_name}] checking {len(CITIES)} cit(y/ies)", flush=True)
             for city in CITIES:
