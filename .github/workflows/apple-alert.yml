@@ -24,7 +24,7 @@ jobs:
       - name: Run alert bot
         run: python apple_alert_bot.py
         env:
-          MODEL_URL: ${{ vars.APPLE_MODEL_URL || 'https://www.apple.com/ae/shop/buy-iphone/iphone-17-pro' }}
+          MODEL_URL: ${{ vars.APPLE_MODEL_URL || 'https://www.apple.com/ae/shop/buy-iphone/iphone-18-pro' }}
           SCREEN_KEYWORD: ${{ vars.APPLE_SCREEN_KEYWORD || '6_9inch' }}
           CAPACITY_KEYWORDS: ${{ vars.APPLE_CAPACITY_KEYWORDS || '256gb,512gb,1tb' }}
           CITIES: ${{ vars.APPLE_CITIES || 'Dubai,Abu Dhabi,Al Ain' }}
