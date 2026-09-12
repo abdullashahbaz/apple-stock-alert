@@ -58,16 +58,18 @@ def visible_text(page):
 
 def click_option_matching(page, keyword):
     """Select a radio option two ways: (1) match Apple's real
-    data-autom attribute containing the keyword (confirmed reliable
-    for screen size and 256GB capacity), or (2) fall back to finding
-    a visible label whose TEXT contains the human-readable version of
-    the keyword (e.g. "512gb" -> "512GB") and clicking its radio —
-    used for capacities we haven't verified the attribute name for."""
+    data-autom attribute containing the keyword, or (2) fall back to
+    finding a visible label whose TEXT contains the human-readable
+    version of the keyword. Either way, click the associated
+    <label for="..."> rather than the input itself — Apple renders
+    the real input invisible (opacity:0) with a visible label overlaid
+    on top of it, so clicking the input directly gets blocked by that
+    overlay (confirmed live: elementFromPoint on the input's own
+    center returns the label's span, not the input)."""
     target = page.locator(f'input[data-autom*="{keyword}"]').first
     found = target.count() > 0
 
     if not found:
-        # Fallback: text-based match, e.g. "512gb" -> "512GB", "1tb" -> "1TB"
         human = keyword.upper()
         handle = page.evaluate_handle(
             """(human) => {
@@ -88,6 +90,13 @@ def click_option_matching(page, keyword):
         except Exception:
             return False
 
+    input_id = target.get_attribute("id")
+    clickable = target
+    if input_id:
+        label = page.locator(f'label[for="{input_id}"]')
+        if label.count() > 0:
+            clickable = label.first
+
     # Force a real change event even if already checked=true from a
     # restored cookie (React's state doesn't always sync to that).
     if target.is_checked():
@@ -95,12 +104,14 @@ def click_option_matching(page, keyword):
         siblings = page.locator(f'input[type="radio"][name="{group_name}"]')
         if siblings.count() > 1:
             try:
-                siblings.nth(1).click(timeout=1000)
+                sib_id = siblings.nth(1).get_attribute("id")
+                sib_label = page.locator(f'label[for="{sib_id}"]') if sib_id else None
+                (sib_label.first if sib_label and sib_label.count() > 0 else siblings.nth(1)).click(timeout=1000)
                 page.wait_for_timeout(400)
             except Exception:
                 pass
     try:
-        target.click(timeout=2000)
+        clickable.click(timeout=2000)
         page.wait_for_timeout(600)
         return True
     except Exception:
@@ -108,10 +119,12 @@ def click_option_matching(page, keyword):
 
 
 def check_availability_for_city(page, city):
-    # Fast path: inline fulfillment quote, shown when the session
-    # already has a known location matching this city.
+    # Fast path: inline sticky delivery/pickup quote, shown once
+    # capacity+color are selected — no login or overlay needed. Confirmed
+    # live: real class is rf-dude-quote-sticky-delivery (NOT the old
+    # rf-fulfillment-quote, which no longer exists on this page).
     try:
-        inline = page.locator(".rf-fulfillment-quote").first
+        inline = page.locator(".rf-dude-quote-sticky-delivery, .rf-dude-quote-sticky-info").first
         if inline.is_visible(timeout=1000):
             text = inline.inner_text()
             if city.lower() in text.lower():
@@ -119,7 +132,11 @@ def check_availability_for_city(page, city):
     except Exception:
         pass
 
-    trigger = page.locator('[data-autom^="productLocatorTriggerLink"], .rf-pickup-quote-overlay-trigger').first
+    # Full path: open the location overlay, pick the city, confirm with
+    # "View Options" (confirmed live: real trigger is deliveryDateChecker;
+    # the old productLocatorTriggerLink/.rf-pickup-quote-overlay-trigger
+    # no longer exist on this page).
+    trigger = page.locator('[data-autom="deliveryDateChecker"], .rf-dude-quote-overlay-trigger').first
     try:
         trigger.click(timeout=2000)
     except Exception:
@@ -130,13 +147,17 @@ def check_availability_for_city(page, city):
         city_select = page.locator('select[name="city"]')
         city_select.wait_for(timeout=3000)
         city_select.select_option(label=city)
+        page.wait_for_timeout(800)
+        view_options = page.locator('[data-autom="viewOptions"]')
+        if view_options.count() > 0:
+            view_options.first.click(timeout=2000)
         page.wait_for_timeout(1500)
-        overlay_text = page.locator(".rf-productlocator-overlay").inner_text()
+        overlay_text = page.locator(".rf-dude-quote-sticky-delivery, .rf-dude-quote-sticky-info").first.inner_text()
     except Exception:
         pass
 
     try:
-        page.locator('[data-autom="overlay-close"]').click(timeout=1000)
+        page.locator('[data-autom="overlay-close"], [aria-label="Close"]').first.click(timeout=1000)
     except Exception:
         pass
 
@@ -209,16 +230,7 @@ def poll_once(page):
                 print(f"  [{capacity}/{color_name}] could not click color — skipping", flush=True)
                 continue
 
-            add_to_bag = page.locator('[data-autom="continueButton"]')
-            try:
-                if not add_to_bag.is_enabled(timeout=1000):
-                    print(f"  [{capacity}/{color_name}] not orderable, skipping cities", flush=True)
-                    continue
-            except Exception:
-                print(f"  [{capacity}/{color_name}] Add to Bag check failed, skipping cities", flush=True)
-                continue
-
-            print(f"  [{capacity}/{color_name}] orderable — checking {len(CITIES)} cit(y/ies)", flush=True)
+            print(f"  [{capacity}/{color_name}] checking {len(CITIES)} cit(y/ies)", flush=True)
             for city in CITIES:
                 tc = time.time()
                 avail_text = check_availability_for_city(page, city)
