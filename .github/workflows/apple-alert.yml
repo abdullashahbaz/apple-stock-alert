@@ -22,7 +22,7 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run alert bot
-        run: python apple_alert_bot.py
+        run: python -u apple_alert_bot.py
         env:
           MODEL_URL: ${{ vars.APPLE_MODEL_URL || 'https://www.apple.com/ae/shop/buy-iphone/iphone-18-pro' }}
           SCREEN_KEYWORD: ${{ vars.APPLE_SCREEN_KEYWORD || '6_9inch' }}
