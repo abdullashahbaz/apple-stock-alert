@@ -294,8 +294,10 @@ def main():
         while datetime.utcnow() < deadline:
             cycle_num += 1
             cycle_start = time.time()
+            cycle_results = []
             try:
                 for capacity, color, city, tag, line in poll_once(page):
+                    cycle_results.append((capacity, color, city, tag, line))
                     key = (capacity, color, city, line[:80])
                     if key not in already_alerted:
                         already_alerted.add(key)
@@ -307,6 +309,19 @@ def main():
                         print(f"Alerted [{tag}]: {capacity} {color} {city} — {line[:80]}")
             except Exception as e:
                 print("Error during poll:", e)
+
+            # Every 5th cycle, resend a digest of everything CURRENTLY
+            # matching, even if unchanged — a periodic "still current"
+            # confirmation, separate from the immediate new-result alerts.
+            if cycle_num % 5 == 0 and cycle_results:
+                digest_lines = "\n\n".join(
+                    f"[{tag}] {capacity} {color} ({city})\n{line}" for capacity, color, city, tag, line in cycle_results
+                )
+                send_email(
+                    f"5-cycle refresh — {len(cycle_results)} pickup match(es) still current",
+                    f"{digest_lines}\n\n{MODEL_URL}",
+                )
+                print(f"Sent 5-cycle refresh digest with {len(cycle_results)} result(s)")
 
             elapsed = time.time() - cycle_start
             print(f"Cycle {cycle_num}: full check took {elapsed:.1f}s — resting {REST_SECONDS}s")
