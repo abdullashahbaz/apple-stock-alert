@@ -202,6 +202,9 @@ def matching_pickup_lines(text):
         low = line.lower()
         if "deliver" in low:
             continue
+        prev_low = lines[i - 1].lower() if i > 0 else ""
+        if not (re.search(r"pick[\s-]*up", low) or re.search(r"pick[\s-]*up", prev_low)):
+            continue  # not a pickup line at all — e.g. Apple's unrelated "Today at Apple" footer link
         matched_keyword = next((k for k in keyword_targets if k in low), None)
         is_target_date = bool(date_pattern and date_pattern.search(low))
         if not (matched_keyword or is_target_date):
