@@ -2,7 +2,7 @@ name: Apple Stock Alert Bot
 
 on:
   schedule:
-    - cron: "0 */3 * * *"   # every 3h — each run loops ~3h50m internally, so shifts overlap
+    - cron: "13 */2 * * *"   # every 2h at :13 past — off the top-of-hour to avoid GitHub's scheduling congestion; each run loops ~3h50m, so with 3+ overlapping shifts running at once, a single delayed trigger can't create a gap
   workflow_dispatch: {}
 
 jobs:
