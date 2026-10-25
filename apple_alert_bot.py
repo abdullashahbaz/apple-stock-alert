@@ -187,6 +187,80 @@ def check_availability_for_city(page, city):
     return final_text, note, confirmed
 
 
+def read_pickup_modal(page, city):
+    """Open the pickup-store popup (the blue store link under 'Pick up in
+    store'), choose the city if the popup has a city dropdown, and return
+    (popup_text, note). Best-effort: always logs what it saw."""
+    try:
+        opened = page.evaluate(
+            """() => {
+                const els = Array.from(document.querySelectorAll('a,button'));
+                const link = els.find(e => /apple\\s+[A-Z]/.test((e.innerText||'').trim()) &&
+                    /pick[\\s-]*up|unavailable/i.test((e.closest('div')?.parentElement?.innerText)||'') &&
+                    e.offsetParent !== null && !/today at apple/i.test(e.innerText));
+                if (!link) return false;
+                link.click();
+                return true;
+            }"""
+        )
+    except Exception as e:
+        return "", f"could not open ({type(e).__name__})"
+    if not opened:
+        return "", "store link NOT found"
+    page.wait_for_timeout(1500)
+    note = "popup opened"
+    try:
+        sel = page.locator('[role="dialog"] select, .rf-overlay select, select[name*="city" i]').first
+        if sel.count() > 0:
+            sel.select_option(label=city, timeout=2000)
+            page.wait_for_timeout(2000)
+            note += f", city set to {city}"
+        else:
+            note += ", no city dropdown found"
+    except Exception as e:
+        note += f", city select failed ({type(e).__name__})"
+    try:
+        text = page.evaluate(
+            """() => {
+                const d = document.querySelector('[role="dialog"], .rf-overlay, .modal');
+                return (d || document.body).innerText;
+            }"""
+        )
+    except Exception:
+        text = ""
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+    return text, note
+
+
+def matching_modal_lines(text):
+    """Store cards in the popup read like 'Available Today' / 'Available
+    Tomorrow' (or a date) next to a store name. Skip 'unavailable'."""
+    if not text:
+        return []
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    hits = []
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if "unavailable" in low or "not available" in low:
+            continue
+        if not re.search(r"\bavailable\b|\bin-store pickup\b|pick[\s-]*up", low):
+            continue
+        if "any" in TARGET_DATES:
+            ok = re.search(r"\btoday\b|\btomorrow\b|\b\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)", low)
+        else:
+            ok = any(k in low for k in TARGET_DATES if not k.isdigit()) or re.search(
+                rf"\b({'|'.join(re.escape(d) for d in TARGET_DATES if d.isdigit()) or 'x^'})\b.{{0,10}}{TARGET_MONTH}", low)
+        if not ok:
+            continue
+        store = next((lines[j] for j in range(i - 1, max(i - 4, -1), -1) if "apple" in lines[j].lower() or "mall" in lines[j].lower()), "")
+        hits.append(("TODAY" if "today" in low else "AVAILABLE", f"{store} - {line}" if store else line))
+    return hits
+
+
 def pickup_snippet(text):
     """The pickup-related lines on the page, for the log."""
     if not text:
@@ -315,18 +389,27 @@ def poll_once(page):
             click_option_matching(page, "noapplecare", "No AppleCare")
             page.wait_for_timeout(500)
 
+            # Step 1: the pickup line on the page itself (your default store).
+            page_text = visible_text(page)
+            print(f"    [{capacity}/{color_name}] page pickup lines: {pickup_snippet(page_text)}", flush=True)
+            for tag, line in matching_pickup_lines(page_text):
+                key = (capacity, color_name, "default store", line)
+                if key not in seen:
+                    seen.add(key)
+                    results.append((capacity, color_name, "default store", tag, line))
+
+            # Step 2: open the blue store link -> "iPhone Availability" popup,
+            # and read every store in each configured city.
             for city in CITIES:
                 tc = time.time()
-                avail_text, note, confirmed = check_availability_for_city(page, city)
-                print(f"    [{capacity}/{color_name}/{city}] {note} ({time.time()-tc:.1f}s)", flush=True)
-                print(f"      pickup lines: {pickup_snippet(avail_text)}", flush=True)
-                label = city if confirmed else "default location (city not confirmed)"
-                for tag, line in matching_pickup_lines(avail_text):
-                    key = (capacity, color_name, label, line)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    results.append((capacity, color_name, label, tag, line))
+                modal_text, note = read_pickup_modal(page, city)
+                print(f"    [{capacity}/{color_name}/{city}] modal: {note} ({time.time()-tc:.1f}s)", flush=True)
+                print(f"      modal text: {modal_text[:350].replace(chr(10), ' | ')}", flush=True)
+                for tag, line in matching_modal_lines(modal_text):
+                    key = (capacity, color_name, city, line)
+                    if key not in seen:
+                        seen.add(key)
+                        results.append((capacity, color_name, city, tag, line))
 
         print(f"  [{capacity}] done ({time.time()-t0:.1f}s total)", flush=True)
 
