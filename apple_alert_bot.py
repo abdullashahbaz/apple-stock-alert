@@ -389,6 +389,15 @@ def poll_once(page):
             click_option_matching(page, "noapplecare", "No AppleCare")
             page.wait_for_timeout(500)
 
+            # Apple only shows the summary (with the "Pick up in store" line)
+            # after pressing Continue.
+            try:
+                page.get_by_role("button", name=re.compile(r"^\s*Continue\s*$", re.I)).first.click(timeout=4000)
+                page.wait_for_timeout(2500)
+                print(f"    [{capacity}/{color_name}] clicked Continue", flush=True)
+            except Exception as e:
+                print(f"    [{capacity}/{color_name}] Continue NOT clicked ({type(e).__name__})", flush=True)
+
             # Step 1: the pickup line on the page itself (your default store).
             page_text = visible_text(page)
             print(f"    [{capacity}/{color_name}] page pickup lines: {pickup_snippet(page_text)}", flush=True)
@@ -410,6 +419,12 @@ def poll_once(page):
                     if key not in seen:
                         seen.add(key)
                         results.append((capacity, color_name, city, tag, line))
+
+            # Summary screen replaces the configurator: start fresh for the next colour.
+            if i < count - 1:
+                page.goto(MODEL_URL, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(1500)
+                click_option_matching(page, SCREEN_KEYWORD)
 
         print(f"  [{capacity}] done ({time.time()-t0:.1f}s total)", flush=True)
 
