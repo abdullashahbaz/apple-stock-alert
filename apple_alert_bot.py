@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Apple.ae Stock ALERT Bot - GitHub Actions version. Alert-only, no purchase.
+Apple.ae Stock ALERT Bot - alert only, no purchase.
 
-Checks every colour of the chosen storage sizes for in-store PICKUP
-availability in your chosen cities and emails you when it finds some.
+How it checks (mirrors what you do by hand):
+  1. open a configurator page for the phone (Pro Max, any colour/size)
+  2. click the blue store link under "Pick up in store" -> "iPhone Availability" popup
+  3. inside the popup, switch Finish + Capacity and read every store's status:
+       "Available Today" / "Available Tomorrow" / "Currently unavailable"
+  4. email you for stores in your chosen cities that are available
 
-TARGET_DATES controls what counts as an alert:
-  any                -> ANY real pickup line (Today, Tomorrow, a dated store)
-  today,18,19,20     -> only those (day numbers must sit next to TARGET_MONTH)
-"Currently unavailable" and delivery-only lines never alert.
-
-The log prints, for every check, whether the city switch worked and the exact
-pickup lines the bot read, so a silent run can be diagnosed from the log.
+TARGET_DATES: any            -> any "Available ..." store (Today, Tomorrow, a date)
+              today,tomorrow -> only those words (day numbers also work with TARGET_MONTH)
+The log prints the popup text for every check so a silent run can be diagnosed.
 """
 
 import os
@@ -31,6 +31,7 @@ def env_list(name, default):
 
 
 MODEL_URL = os.environ.get("MODEL_URL") or "https://www.apple.com/ae/shop/buy-iphone/iphone-18-pro"
+ENTRY_URL = os.environ.get("ENTRY_URL") or ""
 SCREEN_KEYWORD = os.environ.get("SCREEN_KEYWORD") or "6_9inch"
 CAPACITY_KEYWORDS = env_list("CAPACITY_KEYWORDS", "256gb,512gb,1tb")
 CITIES = env_list("CITIES", "Dubai,Abu Dhabi,Al Ain")
@@ -89,345 +90,185 @@ def visible_text(page):
     )
 
 
-def click_via_label(page, target):
-    """Click an input's <label for="..."> instead of the input itself.
-    Apple renders these inputs invisible with a visible label on top, so
-    clicking the input directly gets blocked by the label."""
-    input_id = target.get_attribute("id")
-    clickable = target
-    if input_id:
-        label = page.locator(f'label[for="{input_id}"]')
-        if label.count() > 0:
-            clickable = label.first
-    clickable.click(timeout=2000)
+def entry_url():
+    """A configurator page that already has a model/colour/size chosen, so the
+    'Pick up in store' store link exists (the bare model page has none)."""
+    if ENTRY_URL:
+        return ENTRY_URL
+    if "inch-display" in MODEL_URL:
+        return MODEL_URL
+    slug = SCREEN_KEYWORD.replace("_", ".").replace("inch", "-inch-display")  # 6_9inch -> 6.9-inch-display
+    cap = CAPACITY_KEYWORDS[0] if CAPACITY_KEYWORDS else "256gb"
+    return f"{MODEL_URL.rstrip('/')}/{slug}-{cap}-glacier"
 
 
-def click_option_matching(page, keyword, fallback_text=None):
-    """Select a radio option by its data-autom keyword; if no such input
-    exists, fall back to a visible label containing fallback_text."""
-    target = page.locator(f'input[data-autom*="{keyword}"]').first
-    if target.count() == 0:
-        human = (fallback_text or keyword).upper()
-        handle = page.evaluate_handle(
-            """(human) => {
-                const labels = Array.from(document.querySelectorAll('label, span, div'));
-                const match = labels.find(el => (el.innerText || '').trim().toUpperCase().includes(human) && el.offsetParent !== null);
-                if (!match) return null;
-                return match.closest('label') || match.querySelector('input[type="radio"]') || match.previousElementSibling;
-            }""",
-            human,
-        )
-        el = handle.as_element()
-        if el is None:
-            return False
+def pick_radio(page, name, value):
+    """Click the visible label of a radio (inputs are invisible) by name+value."""
+    return page.evaluate(
+        """([name, value]) => {
+            const i = document.querySelector(`input[name="${name}"][value="${value}"]`);
+            if (!i) return false;
+            const l = document.querySelector(`label[for="${i.id}"]`);
+            (l || i).click();
+            return true;
+        }""",
+        [name, value],
+    )
+
+
+def open_availability_popup(page):
+    """Select no-trade-in / no-AppleCare (harmless if absent), then click the
+    blue store link. Returns True if the 'iPhone Availability' popup is open."""
+    for autom in ("choose-noTradeIn", "noapplecare"):
         try:
-            el.click(timeout=2000)
-            page.wait_for_timeout(600)
-            return True
+            page.evaluate(
+                """(a) => { const i = document.querySelector(`input[data-autom="${a}"]`);
+                    if (!i) return; const l = document.querySelector(`label[for="${i.id}"]`); (l || i).click(); }""",
+                autom,
+            )
+            page.wait_for_timeout(700)
         except Exception:
-            return False
-
-    # Force a real change event even if already checked from a restored cookie.
-    if target.is_checked():
-        group_name = target.get_attribute("name")
-        siblings = page.locator(f'input[type="radio"][name="{group_name}"]')
-        if siblings.count() > 1:
-            try:
-                click_via_label(page, siblings.nth(1))
-                page.wait_for_timeout(400)
-            except Exception:
-                pass
+            pass
+    opened = page.evaluate(
+        """() => {
+            const b = Array.from(document.querySelectorAll('.rf-pickup-quote-overlay-trigger'))
+                .find(e => e.offsetParent !== null);
+            if (!b) return false;
+            b.click();
+            return true;
+        }"""
+    )
+    if not opened:
+        return False
     try:
-        click_via_label(page, target)
-        page.wait_for_timeout(600)
-        return True
+        page.wait_for_function("document.body.innerText.includes('iPhone Availability')", timeout=8000)
     except Exception:
         return False
+    return True
 
 
-def delivers_to(text, city):
-    """True if the page's delivery line currently names this city."""
-    return bool(re.search(rf"delivers to:?\s*{re.escape(city)}", text, re.IGNORECASE))
+def popup_options(page, name):
+    return page.evaluate(
+        """(name) => Array.from(document.querySelectorAll(`input[name="${name}"]`)).map(i => i.value)""",
+        name,
+    )
 
 
-def check_availability_for_city(page, city):
-    """Returns (page_text, note, confirmed). 'confirmed' means the page
-    itself shows it is now quoting for this city."""
-    text = visible_text(page)
-    if delivers_to(text, city):
-        return text, "page already on this city", True
-
-    trigger = page.locator('[data-autom="deliveryDateChecker"], .rf-dude-quote-overlay-trigger').first
-    try:
-        trigger.click(timeout=2000)
-    except Exception:
-        return text, "location link NOT found - using default location", False
-
-    note = "city switch attempted"
-    try:
-        city_select = page.locator('select[name="city"]')
-        city_select.wait_for(timeout=3000)
-        city_select.select_option(label=city)
-        page.wait_for_timeout(800)
-        view_options = page.locator('[data-autom="viewOptions"]')
-        if view_options.count() > 0:
-            view_options.first.click(timeout=2000)
-        page.wait_for_timeout(1500)
-    except Exception as e:
-        note = f"city switch FAILED ({type(e).__name__})"
-
-    try:
-        page.locator('[data-autom="overlay-close"], [aria-label="Close"]').first.click(timeout=1000)
-    except Exception:
-        pass
-
-    final_text = visible_text(page)
-    confirmed = delivers_to(final_text, city)
-    note += " - city confirmed" if confirmed else " - city NOT confirmed"
-    return final_text, note, confirmed
+def set_city(page, city):
+    return page.evaluate(
+        """(city) => {
+            const s = Array.from(document.querySelectorAll('select')).find(
+                x => Array.from(x.options).some(o => o.text.trim() === city));
+            if (!s) return false;
+            s.value = Array.from(s.options).find(o => o.text.trim() === city).value;
+            s.dispatchEvent(new Event('change', {bubbles: true}));
+            return true;
+        }""",
+        city,
+    )
 
 
-def read_pickup_modal(page, city):
-    """Open the pickup-store popup (the blue store link under 'Pick up in
-    store'), choose the city if the popup has a city dropdown, and return
-    (popup_text, note). Best-effort: always logs what it saw."""
-    try:
-        opened = page.evaluate(
-            """() => {
-                const els = Array.from(document.querySelectorAll('a,button'));
-                const link = els.find(e => /apple\\s+[A-Z]/.test((e.innerText||'').trim()) &&
-                    /pick[\\s-]*up|unavailable/i.test((e.closest('div')?.parentElement?.innerText)||'') &&
-                    e.offsetParent !== null && !/today at apple/i.test(e.innerText));
-                if (!link) return false;
-                link.click();
-                return true;
-            }"""
-        )
-    except Exception as e:
-        return "", f"could not open ({type(e).__name__})"
-    if not opened:
-        return "", "store link NOT found"
-    page.wait_for_timeout(1500)
-    note = "popup opened"
-    try:
-        sel = page.locator('[role="dialog"] select, .rf-overlay select, select[name*="city" i]').first
-        if sel.count() > 0:
-            sel.select_option(label=city, timeout=2000)
-            page.wait_for_timeout(2000)
-            note += f", city set to {city}"
-        else:
-            note += ", no city dropdown found"
-    except Exception as e:
-        note += f", city select failed ({type(e).__name__})"
-    try:
-        text = page.evaluate(
-            """() => {
-                const d = document.querySelector('[role="dialog"], .rf-overlay, .modal');
-                return (d || document.body).innerText;
-            }"""
-        )
-    except Exception:
-        text = ""
-    try:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
-    except Exception:
-        pass
-    return text, note
+def popup_text(page):
+    return visible_text(page)
 
 
-def matching_modal_lines(text):
-    """Store cards in the popup read like 'Available Today' / 'Available
-    Tomorrow' (or a date) next to a store name. Skip 'unavailable'."""
-    if not text:
-        return []
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    hits = []
-    for i, line in enumerate(lines):
-        low = line.lower()
-        if "unavailable" in low or "not available" in low:
-            continue
-        if not re.search(r"\bavailable\b|\bin-store pickup\b|pick[\s-]*up", low):
-            continue
-        if "any" in TARGET_DATES:
-            ok = re.search(r"\btoday\b|\btomorrow\b|\b\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)", low)
-        else:
-            ok = any(k in low for k in TARGET_DATES if not k.isdigit()) or re.search(
-                rf"\b({'|'.join(re.escape(d) for d in TARGET_DATES if d.isdigit()) or 'x^'})\b.{{0,10}}{TARGET_MONTH}", low)
-        if not ok:
-            continue
-        store = next((lines[j] for j in range(i - 1, max(i - 4, -1), -1) if "apple" in lines[j].lower() or "mall" in lines[j].lower()), "")
-        hits.append(("TODAY" if "today" in low else "AVAILABLE", f"{store} - {line}" if store else line))
-    return hits
-
-
-def pickup_snippet(text):
-    """The pickup-related lines on the page, for the log."""
-    if not text:
-        return "(no text)"
+def parse_stores(text):
+    """Store cards look like:
+         Apple Mall of the Emirates / Dubai / 13.14 km / Available Today / In-Store Pickup
+    Returns [(store, city, status)]."""
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     out = []
-    for i, l in enumerate(lines):
-        if re.search(r"pick[\s-]*up", l, re.IGNORECASE):
-            out.append(l)
-            if i + 1 < len(lines):
-                out.append(lines[i + 1])
-    seen, res = set(), []
-    for l in out:
-        if l not in seen:
-            seen.add(l)
-            res.append(l)
-    if not res:
-        return "(no pickup lines on page)"
-    return " | ".join(res[:6])[:300]
-
-
-def matching_pickup_lines(text):
-    """Return lines confirming in-store PICKUP availability.
-
-    TARGET_DATES = any  -> any real pickup line (Today, Tomorrow, dated),
-                           ignoring "unavailable" messages.
-    otherwise           -> only the listed keywords/dates.
-    Delivery lines are always ignored.
-    """
-    if not text:
-        return []
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    hits = []
-    keyword_targets = [d for d in TARGET_DATES if not d.isdigit() and d != "any"]
-    day_number_targets = [d for d in TARGET_DATES if d.isdigit()]
-    date_pattern = re.compile(
-        rf"\b({'|'.join(re.escape(d) for d in day_number_targets)})\b.{{0,10}}\b{TARGET_MONTH}\w*\b"
-        rf"|\b{TARGET_MONTH}\w*\b.{{0,10}}\b({'|'.join(re.escape(d) for d in day_number_targets)})\b",
-        re.IGNORECASE,
-    ) if day_number_targets else None
-
     for i, line in enumerate(lines):
-        low = line.lower()
-        if "deliver" in low:
-            continue
-        prev_low = lines[i - 1].lower() if i > 0 else ""
-        if not (re.search(r"pick[\s-]*up", low) or re.search(r"pick[\s-]*up", prev_low)):
-            continue  # not a pickup line (e.g. Apple's "Today at Apple" footer link)
+        if re.fullmatch(r"(available\b.*|currently unavailable|unavailable|not available.*)", line, re.IGNORECASE):
+            store = lines[i - 3] if i >= 3 else ""
+            city = lines[i - 2] if i >= 2 else ""
+            if re.search(r"\bkm\b", city, re.IGNORECASE):  # layout without city line
+                store, city = lines[i - 2], ""
+            out.append((store, city, line))
+    return out
 
-        if "any" in TARGET_DATES:
-            if re.search(r"unavailable|not available", low):
-                continue
-            # needs a real store or date, not just the bare "Pick up in store:" label
-            if not re.search(
-                r"\bat apple\b|\btoday\b|\btomorrow\b|\b\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
-                low,
-            ):
-                continue
-            context = lines[i - 1] if i > 0 and "apple" in lines[i - 1].lower() else ""
-            hits.append(("AVAILABLE", f"{context} - {line}" if context else line))
-            continue
 
-        matched_keyword = next((k for k in keyword_targets if k in low), None)
-        is_target_date = bool(date_pattern and date_pattern.search(low))
-        if not (matched_keyword or is_target_date):
-            continue
-        context = lines[i - 1] if i > 0 and "apple" in lines[i - 1].lower() else ""
-        line_out = f"{context} - {line}" if context else line
-        tag = "TODAY" if matched_keyword == "today" else ("TARGET DATE" if is_target_date else matched_keyword.upper())
-        hits.append((tag, line_out))
-    return hits
+def status_matches(status):
+    low = status.lower()
+    if "unavailable" in low or "not available" in low:
+        return None
+    if not low.startswith("available"):
+        return None
+    if "any" in TARGET_DATES:
+        return "TODAY" if "today" in low else "AVAILABLE"
+    for k in TARGET_DATES:
+        if not k.isdigit() and k in low:
+            return "TODAY" if k == "today" else k.upper()
+    nums = [d for d in TARGET_DATES if d.isdigit()]
+    if nums and re.search(rf"\b({'|'.join(nums)})\b.{{0,10}}{TARGET_MONTH}|{TARGET_MONTH}\w*.{{0,10}}\b({'|'.join(nums)})\b", low):
+        return "TARGET DATE"
+    return None
 
 
 def poll_once(page):
-    results = []
-    seen = set()
+    results, seen = [], set()
+    t0 = time.time()
+    url = entry_url()
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(2500)
+    if "captcha" in visible_text(page).lower():
+        print("  CAPTCHA detected - skipping this cycle", flush=True)
+        return results
+    print(f"  entry page loaded ({time.time()-t0:.1f}s): {url}", flush=True)
 
-    for capacity in CAPACITY_KEYWORDS:
-        t0 = time.time()
-        page.goto(MODEL_URL, wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(1500)
-        print(f"  [{capacity}] page loaded ({time.time()-t0:.1f}s)", flush=True)
-        page_snippet = visible_text(page)[:300].replace("\n", " | ")
-
-        if "captcha" in visible_text(page).lower():
-            print(f"  [{capacity}] CAPTCHA detected - skipping", flush=True)
-            continue
-
-        click_option_matching(page, SCREEN_KEYWORD)
-
-        color_radios = page.locator('input[data-autom^="dimensionColor"]')
-        count = color_radios.count()
-        print(f"  [{capacity}] found {count} color option(s)", flush=True)
-
-        for i in range(count):
-            radio = color_radios.nth(i)
-            color_attr = radio.get_attribute("data-autom") or ""
-            color_name = color_attr.replace("dimensionColor", "") or f"color{i}"
+    if not open_availability_popup(page):
+        txt = visible_text(page)
+        idx = max(txt.lower().find("delivers to"), 0)
+        print(f"  popup NOT opened. page near 'delivers to': {txt[idx:idx+200]!r}", flush=True)
+        if not _debug_sent[0]:
             try:
-                click_via_label(page, radio)
-                page.wait_for_timeout(800)
-            except Exception:
-                print(f"  [{capacity}/{color_name}] could not click color - skipping", flush=True)
-                continue
-
-            capacity_ok = click_option_matching(page, capacity)
-            if not capacity_ok:
-                print(f"  [{capacity}/{color_name}] could not select this capacity - skipping", flush=True)
-                if not _debug_sent[0]:
-                    try:
-                        shot_path = f"debug-{capacity}-{cycle_screenshot_tag()}.png"
-                        page.screenshot(path=shot_path, full_page=True)
-                        send_email(
-                            f"DEBUG - could not select capacity {capacity}",
-                            f"Page text snippet:\n{page_snippet}\n\nScreenshot attached.",
-                            attachment_path=shot_path,
-                        )
-                        _debug_sent[0] = True
-                    except Exception as e:
-                        print(f"  could not email debug screenshot: {e}", flush=True)
-                continue
-
-            # Apple requires an explicit no-trade-in and no-AppleCare choice
-            # before the pickup dates appear.
-            click_option_matching(page, "noTradeIn", "No trade-in")
-            click_option_matching(page, "noapplecare", "No AppleCare")
-            page.wait_for_timeout(500)
-
-            # Apple only shows the summary (with the "Pick up in store" line)
-            # after pressing Continue.
-            try:
-                page.get_by_role("button", name=re.compile(r"^\s*Continue\s*$", re.I)).first.click(timeout=4000)
-                page.wait_for_timeout(2500)
-                print(f"    [{capacity}/{color_name}] clicked Continue", flush=True)
+                shot = f"debug-popup-{cycle_screenshot_tag()}.png"
+                page.screenshot(path=shot, full_page=True)
+                send_email("DEBUG - could not open the pickup popup",
+                           f"URL: {url}\n\nPage text near delivery:\n{txt[idx:idx+400]}", attachment_path=shot)
+                _debug_sent[0] = True
             except Exception as e:
-                print(f"    [{capacity}/{color_name}] Continue NOT clicked ({type(e).__name__})", flush=True)
+                print(f"  could not email debug screenshot: {e}", flush=True)
+        return results
+    print("  popup opened", flush=True)
 
-            # Step 1: the pickup line on the page itself (your default store).
-            page_text = visible_text(page)
-            print(f"    [{capacity}/{color_name}] page pickup lines: {pickup_snippet(page_text)}", flush=True)
-            for tag, line in matching_pickup_lines(page_text):
-                key = (capacity, color_name, "default store", line)
+    colours = popup_options(page, "pl_dimensionColor")
+    caps_available = popup_options(page, "pl_dimensionCapacity")
+    print(f"  popup colours={colours} capacities={caps_available}", flush=True)
+    pick_radio(page, "pl_dimensionScreensize", SCREEN_KEYWORD)
+    page.wait_for_timeout(1200)
+    colours = popup_options(page, "pl_dimensionColor") or colours
+
+    for cap in CAPACITY_KEYWORDS:
+        if cap not in caps_available:
+            print(f"  capacity {cap} not offered - skipping", flush=True)
+            continue
+        for colour in colours:
+            pick_radio(page, "pl_dimensionColor", colour)
+            pick_radio(page, "pl_dimensionCapacity", cap)
+            want = f"{cap} {colour}".lower()
+            try:
+                page.wait_for_function(
+                    "(w) => document.body.innerText.toLowerCase().includes(w)", arg=want, timeout=8000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+            text = popup_text(page)
+            stores = parse_stores(text)
+            summary = "; ".join(f"{s} [{c}] {st}" for s, c, st in stores) or "(no store cards found)"
+            print(f"  [{cap}/{colour}] {summary[:400]}", flush=True)
+            for store, city, status in stores:
+                tag = status_matches(status)
+                if not tag:
+                    continue
+                if CITIES and city and not any(c.lower() == city.lower() for c in CITIES):
+                    continue
+                line = f"{store} ({city}) - {status}"
+                key = (cap, colour, store, status)
                 if key not in seen:
                     seen.add(key)
-                    results.append((capacity, color_name, "default store", tag, line))
-
-            # Step 2: open the blue store link -> "iPhone Availability" popup,
-            # and read every store in each configured city.
-            for city in CITIES:
-                tc = time.time()
-                modal_text, note = read_pickup_modal(page, city)
-                print(f"    [{capacity}/{color_name}/{city}] modal: {note} ({time.time()-tc:.1f}s)", flush=True)
-                print(f"      modal text: {modal_text[:350].replace(chr(10), ' | ')}", flush=True)
-                for tag, line in matching_modal_lines(modal_text):
-                    key = (capacity, color_name, city, line)
-                    if key not in seen:
-                        seen.add(key)
-                        results.append((capacity, color_name, city, tag, line))
-
-            # Summary screen replaces the configurator: start fresh for the next colour.
-            if i < count - 1:
-                page.goto(MODEL_URL, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(1500)
-                click_option_matching(page, SCREEN_KEYWORD)
-
-        print(f"  [{capacity}] done ({time.time()-t0:.1f}s total)", flush=True)
-
+                    results.append((cap, colour, city or "?", tag, line))
+    print(f"  check done ({time.time()-t0:.1f}s total)", flush=True)
     return results
 
 
@@ -458,7 +299,7 @@ def main():
                         priority = "TODAY - " if tag == "TODAY" else ""
                         send_email(
                             f"{priority}iPhone pickup available - {capacity} {color} ({city})",
-                            f"Capacity: {capacity}\nColor: {color}\nCity: {city}\nMatch: {tag}\n\n{line}\n\n{MODEL_URL}",
+                            f"Capacity: {capacity}\nColor: {color}\nCity: {city}\nMatch: {tag}\n\n{line}\n\n{entry_url()}",
                         )
                         print(f"Alerted [{tag}]: {capacity} {color} {city} - {line[:80]}", flush=True)
             except Exception as e:
@@ -474,7 +315,7 @@ def main():
                 )
                 send_email(
                     f"5-cycle refresh - {len(cycle_results)} pickup match(es) still current",
-                    f"{digest_lines}\n\n{MODEL_URL}",
+                    f"{digest_lines}\n\n{entry_url()}",
                 )
                 print(f"Sent 5-cycle refresh digest with {len(cycle_results)} result(s)", flush=True)
 
