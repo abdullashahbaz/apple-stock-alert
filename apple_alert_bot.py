@@ -116,33 +116,61 @@ def pick_radio(page, name, value):
     )
 
 
-def open_availability_popup(page):
-    """Select no-trade-in / no-AppleCare (harmless if absent), then click the
-    blue store link. Returns True if the 'iPhone Availability' popup is open."""
-    for autom in ("choose-noTradeIn", "noapplecare"):
+def choose_option(page, autom):
+    """Select a radio by data-autom with a REAL click on its visible label,
+    then confirm it is checked. Returns True/False and logs the outcome."""
+    sel = f'input[data-autom="{autom}"]'
+    try:
+        page.wait_for_selector(sel, state="attached", timeout=10000)
+    except Exception:
+        print(f"    option {autom}: NOT on page", flush=True)
+        return False
+    for attempt in range(3):
         try:
-            page.evaluate(
-                """(a) => { const i = document.querySelector(`input[data-autom="${a}"]`);
-                    if (!i) return; const l = document.querySelector(`label[for="${i.id}"]`); (l || i).click(); }""",
-                autom,
-            )
-            page.wait_for_timeout(700)
+            input_id = page.get_attribute(sel, "id")
+            label = page.locator(f'label[for="{input_id}"]').first
+            label.scroll_into_view_if_needed(timeout=3000)
+            label.click(timeout=4000)
+        except Exception as e:
+            print(f"    option {autom}: click attempt {attempt+1} failed ({type(e).__name__})", flush=True)
+            try:
+                page.evaluate(
+                    """(s) => { const i = document.querySelector(s); const l = document.querySelector(`label[for="${i.id}"]`); (l || i).click(); }""",
+                    sel,
+                )
+            except Exception:
+                pass
+        page.wait_for_timeout(1200)
+        try:
+            if page.is_checked(sel):
+                print(f"    option {autom}: selected", flush=True)
+                return True
         except Exception:
             pass
-    opened = page.evaluate(
-        """() => {
-            const b = Array.from(document.querySelectorAll('.rf-pickup-quote-overlay-trigger'))
-                .find(e => e.offsetParent !== null);
-            if (!b) return false;
-            b.click();
-            return true;
-        }"""
-    )
-    if not opened:
+    print(f"    option {autom}: could NOT confirm selected", flush=True)
+    return False
+
+
+def open_availability_popup(page):
+    """Select no-trade-in, then no-AppleCare (Apple shows the pickup section
+    only after both), wait for the blue store link, click it. Returns True if
+    the 'iPhone Availability' popup is open."""
+    choose_option(page, "choose-noTradeIn")
+    choose_option(page, "noapplecare")
+    try:
+        page.wait_for_selector(".rf-pickup-quote-overlay-trigger", state="visible", timeout=12000)
+    except Exception:
+        print("    store link (.rf-pickup-quote-overlay-trigger) did not appear", flush=True)
+        return False
+    try:
+        page.locator(".rf-pickup-quote-overlay-trigger:visible").first.click(timeout=4000)
+    except Exception as e:
+        print(f"    store link click failed ({type(e).__name__})", flush=True)
         return False
     try:
         page.wait_for_function("document.body.innerText.includes('iPhone Availability')", timeout=8000)
     except Exception:
+        print("    popup did not open after clicking the store link", flush=True)
         return False
     return True
 
